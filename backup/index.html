@@ -386,6 +386,7 @@
       <div class="code" id="roomCodeDisp"></div>
       <div class="url" id="joinUrlDisp"></div>
       <div class="url" id="roomStatus" style="font-weight:700; margin-top:10px;"></div>
+      <div class="url" id="buildTag" style="margin-top:4px;"></div>
     </div>
     <div>
       <h2 class="h-md" style="margin-bottom:6px;">Teams</h2>
@@ -410,6 +411,14 @@
         </div>
         <p style="margin:8px 0 0; font-size:13.5px;">The relay is embedded in the QR code, so joining phones use it automatically.</p>
       </details>
+      <details class="hosthelp">
+        <summary>🧪 Connection self-test — run this before the workshop</summary>
+        <div style="margin-top:8px;">
+          <button class="tbtn" onclick="runSelfTest()">▶ Run self-test</button>
+        </div>
+        <ul id="selftestOut" style="list-style:none; margin-top:6px;"></ul>
+      </details>
+
 
     </div>
   </div>
@@ -529,6 +538,7 @@
   <div class="teampick" id="pTeamPick"><p style="color:var(--light);">Waiting for the host…</p></div>
   <button class="btn" id="pJoinBtn" style="width:100%;" onclick="pJoin()">Join →</button>
   <p class="watchnote" id="pJoinNote" style="display:none;"></p>
+  <p class="footer-note" id="pBuild"></p>
 </section>
 
 <section class="pscreen" id="p-wait">
@@ -767,6 +777,7 @@ function check32110(sel){
 /* =====================================================================
    SHARED STATE
    ===================================================================== */
+const BUILD = 'v2.2 \u00b7 2026-07-07';
 const SAVE_KEY = 'csupmne-strg-v2';
 const PEER_PREFIX = 'csmne-strg-v2-';
 const ROOM_PARAM = new URLSearchParams(location.search).get('room');
@@ -955,6 +966,8 @@ function renderLobby(){
   if (rs) rs.textContent = net.error ? '\u2717 room problem \u2014 see note above' : (net.open ? '\u2713 room open \u2014 phones can join' : ('\u2026 opening room \u00b7 broker ' + ((net.brokerIdx || 0) + 1) + '/' + BROKERS.length));
   const tin = document.getElementById('turnInput');
   if (tin && !tin.value){ try{ tin.value = localStorage.getItem(TURN_KEY_STORE) || ''; }catch(e){} }
+  const bt = document.getElementById('buildTag');
+  if (bt) bt.textContent = 'build ' + BUILD;
 
   const urlEl = document.getElementById('joinUrlDisp');
   const qrEl = document.getElementById('qrBox');
@@ -1180,8 +1193,6 @@ const net = { peer:null, conns:new Map(), liveCids:new Set(), open:false, error:
 const ICE = { config:{ iceServers:[
   {urls:['stun:stun.l.google.com:19302','stun:stun1.l.google.com:19302']},
   {urls:'stun:stun.cloudflare.com:3478'},
-  {urls:'turn:openrelay.metered.ca:80', username:'openrelayproject', credential:'openrelayproject'},
-  {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject'},
 ], iceCandidatePoolSize:2 }, debug:0, turnReady:false };
 
 /* ---------- signaling brokers (failover list; host and phones must meet on the same one,
@@ -1229,6 +1240,65 @@ function saveTurn(){
     renderLobbySafe();
   });
 }
+
+/* ---------- connection self-test (host lobby) ---------- */
+function testBrokerWS(host){
+  return new Promise(res => {
+    let done = false;
+    try{
+      const ws = new WebSocket('wss://' + host + '/peerjs?key=peerjs&id=csmne-selftest-' +
+        Math.random().toString(36).slice(2,10) + '&token=t' + Date.now() + '&version=1.5.4');
+      const to = setTimeout(() => { if (!done){ done = true; try{ ws.close(); }catch(e){} res(false); } }, 6000);
+      ws.onmessage = () => { if (!done){ done = true; clearTimeout(to); try{ ws.close(); }catch(e){} res(true); } };
+      ws.onerror = () => { if (!done){ done = true; clearTimeout(to); res(false); } };
+    }catch(e){ res(false); }
+  });
+}
+function testTurnRelay(servers){
+  return new Promise(res => {
+    let got = false;
+    try{
+      const pc = new RTCPeerConnection({iceServers:servers, iceTransportPolicy:'relay'});
+      pc.createDataChannel('t');
+      pc.onicecandidate = e => {
+        if (e.candidate && /relay/.test(e.candidate.candidate)){ got = true; try{ pc.close(); }catch(x){} res(true); }
+      };
+      setTimeout(() => { if (!got){ try{ pc.close(); }catch(x){} res(false); } }, 7000);
+      pc.createOffer().then(o => pc.setLocalDescription(o));
+    }catch(e){ res(false); }
+  });
+}
+async function runSelfTest(){
+  const out = document.getElementById('selftestOut');
+  out.innerHTML = '<li>\u23f3 running\u2026 (takes up to 15 s)</li>';
+  const rows = [];
+  const add = (ok, txt) => rows.push('<li style="margin:6px 0;">' +
+    (ok === true ? '\u2705' : ok === false ? '\u274c' : '\u26a0\ufe0f') + ' ' + txt + '</li>');
+  for (let i = 0; i < BROKERS.length; i++){
+    const host = BROKERS[i].host || '0.peerjs.com';
+    const okB = await testBrokerWS(host);
+    add(okB, 'Broker ' + (i+1) + ' \u2014 ' + host + (okB ? ': reachable' : ': NOT reachable from this network right now'));
+  }
+  add(net.open === true, net.open
+    ? 'Room ' + (state.roomCode || '') + ' is open on broker ' + ((state.brokerIdx || 0) + 1)
+    : 'Room not open yet \u2014 see the status under the QR code');
+  const cred = turnCred();
+  if (!cred || !cred.includes(':')){
+    add(null, 'No TURN relay configured. Most networks connect fine without one, but strict networks (some carriers, eduroam) may fail. Add one above for maximum reliability.');
+  } else {
+    await loadTurn();
+    if (!ICE.turnReady){
+      add(false, 'TURN credentials rejected \u2014 check the appname:apikey value.');
+    } else {
+      const okR = await testTurnRelay(ICE.config.iceServers);
+      add(okR, okR
+        ? 'TURN relay verified end-to-end \u2014 worst-case networks are covered.'
+        : 'TURN credentials accepted but no relay path found \u2014 check the metered.ca dashboard / quota.');
+    }
+  }
+  out.innerHTML = rows.join('');
+}
+
 
 
 function genRoomCode(){
@@ -1340,6 +1410,7 @@ function snapshot(){
   };
   return {
     t:'state',
+    v: BUILD,
     ph: phaseMap[state.phase] || 'lobby',
     teams: state.teams.map(t => ({name:t.name, sel:t.sel, locked:t.locked})),
     roster: state.roster,
@@ -1386,10 +1457,25 @@ function pConnect(){
   hintIfStruggling();
   try{ if (pj.peer) pj.peer.destroy(); }catch(e){}
   pj.conn = null;
+  pj.stage = 1;
   /* watchdog: if the full handshake hasn't completed in 9s, tear down and retry */
   clearTimeout(pj.watch);
   pj.watch = setTimeout(() => {
     if (pj.conn && pj.conn.open) return;
+    let hint = '';
+    try{
+      if (pj.stage >= 2 && pj.conn){
+        hint = ICE.turnReady
+          ? 'found the room but no path even via the relay \u2014 check this phone\u2019s internet.'
+          : 'found the room, but this network blocks the direct connection \u2014 mobile data usually fixes it.';
+      } else if ((pj.stage || 0) < 2){
+        hint = 'cannot reach the connection broker \u2014 this network may block it; try mobile data.';
+      }
+    }catch(e){}
+    if (hint){
+      const note = document.getElementById('pJoinNote');
+      if (note){ note.style.display = ''; note.textContent = '\ud83d\udca1 ' + hint; }
+    }
     scheduleRetry(true);
   }, 9000);
   let peer;
@@ -1399,11 +1485,13 @@ function pConnect(){
   }catch(e){ setConn('bad','connection failed'); scheduleRetry(); return; }
   peer.on('open', () => {
     if (peer !== pj.peer) return;
+    pj.stage = 2;
     const conn = peer.connect(PEER_PREFIX + ROOM_PARAM.toUpperCase(), {reliable:true});
     pj.conn = conn;
     conn.on('open', () => {
       if (peer !== pj.peer) return;
       clearTimeout(pj.watch);
+      pj.stage = 3;
       pj.attempt = 0;
       pj.lastMsg = Date.now();
       setConn('ok','connected \u00b7 room ' + ROOM_PARAM.toUpperCase());
@@ -1414,7 +1502,14 @@ function pConnect(){
     });
     conn.on('data', m => {
       pj.lastMsg = Date.now();
-      if (m && m.t === 'state'){ pj.snap = m; pRender(); }
+      if (m && m.t === 'state'){
+        if (m.v && m.v !== BUILD && !pj.vWarned){
+          pj.vWarned = true;
+          const note = document.getElementById('pJoinNote');
+          if (note){ note.style.display = ''; note.textContent = '\ud83d\udd04 New game version available \u2014 reload this page when convenient.'; }
+        }
+        pj.snap = m; pRender();
+      }
     });
     conn.on('close', () => { if (peer === pj.peer){ setConn('bad','reconnecting\u2026'); scheduleRetry(true); } });
     conn.on('error', () => { if (peer === pj.peer){ setConn('bad','reconnecting\u2026'); scheduleRetry(true); } });
@@ -1661,6 +1756,9 @@ function beep(){
         if (p && p.cid === pj.cid){ pj.joined = true; pj.name = p.name; pj.team = p.team; }
       }
     }catch(e){ pj.cid = 'c' + Math.random().toString(36).slice(2,10); }
+    try{ console.log('CSupMNE game build', BUILD); }catch(e){}
+    const pb = document.getElementById('pBuild');
+    if (pb) pb.textContent = 'build ' + BUILD;
     pj.b0 = parseInt(new URLSearchParams(location.search).get('b') || '0', 10) || 0;
     pShow('p-join');
     pRender();

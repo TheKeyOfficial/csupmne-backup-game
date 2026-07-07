@@ -34,6 +34,16 @@ The `.nojekyll` file is required — it tells GitHub to serve the files as-is.
    and phones reconnect automatically.
 5. No network? Both games fully work in **Classic mode** (host clicks everything).
 
+## Pre-workshop check (do this once, takes 2 minutes)
+
+1. Open the game on the host laptop → *With phones* → lobby.
+2. Open **"🧪 Connection self-test"** and click *Run self-test*. It verifies both
+   signaling brokers, the room, and (if configured) the TURN relay end-to-end.
+3. Join once with your own phone. Green pill = you're done.
+4. The lobby and the phone join screen show a **build stamp** (e.g. `build v2.2`) —
+   if host and phones show different builds, someone has a cached old version
+   (hard-refresh / rescan the QR).
+
 ## If phones get stuck on "connecting…"
 
 The games connect through public signaling brokers with automatic failover
