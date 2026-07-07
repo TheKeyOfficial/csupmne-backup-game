@@ -952,7 +952,7 @@ function renderLobby(){
   const pill = document.getElementById('roomPill');
   if (state.roomCode){ pill.style.display=''; pill.textContent = 'ROOM ' + state.roomCode; }
   const rs = document.getElementById('roomStatus');
-  if (rs) rs.textContent = net.error ? '\u2717 room problem \u2014 see note above' : (net.open ? '\u2713 room open \u2014 phones can join' : '\u2026 opening room');
+  if (rs) rs.textContent = net.error ? '\u2717 room problem \u2014 see note above' : (net.open ? '\u2713 room open \u2014 phones can join' : ('\u2026 opening room \u00b7 broker ' + ((net.brokerIdx || 0) + 1) + '/' + BROKERS.length));
   const tin = document.getElementById('turnInput');
   if (tin && !tin.value){ try{ tin.value = localStorage.getItem(TURN_KEY_STORE) || ''; }catch(e){} }
 
@@ -967,6 +967,7 @@ function renderLobby(){
   } else if (state.roomCode){
     const cred = turnCred();
     const joinUrl = location.href.split(/[?#]/)[0] + '?room=' + state.roomCode +
+      (state.brokerIdx ? '&b=' + state.brokerIdx : '') +
       (cred && cred.includes(':') ? '&tr=' + encodeURIComponent(cred) : '');
     urlEl.textContent = joinUrl;
     try{
@@ -1183,6 +1184,15 @@ const ICE = { config:{ iceServers:[
   {urls:'turn:openrelay.metered.ca:443?transport=tcp', username:'openrelayproject', credential:'openrelayproject'},
 ], iceCandidatePoolSize:2 }, debug:0, turnReady:false };
 
+/* ---------- signaling brokers (failover list; host and phones must meet on the same one,
+   so the chosen index travels inside the QR code as &b=) ---------- */
+const BROKERS = [
+  {host:'peerjs.92k.de', port:443, secure:true},   /* community server — reliable WebSocket */
+  {},                                              /* official PeerJS cloud — often rate-limited (HTTP 429) */
+];
+function brokerOpts(idx){ return Object.assign({}, ICE, BROKERS[idx % BROKERS.length]); }
+
+
 const TURN_KEY_STORE = 'csmne-turn';
 function turnCred(){
   const fromUrl = new URLSearchParams(location.search).get('tr') || '';
@@ -1233,38 +1243,51 @@ function hostStartNet(code){
   save();
   clearTimeout(net.openWatch);
   net.openAttempts = (net.openAttempts || 0) + 1;
+  net.brokerIdx = (net.openAttempts - 1) % BROKERS.length;
   net.openWatch = setTimeout(() => {
     if (net.open) return;
     try{ net.peer.destroy(); }catch(e){}
-    if (net.openAttempts < 5) hostStartNet(state.roomCode);
-    else { net.error = 'cannot reach the connection broker — check this computer\u2019s internet access'; net.openAttempts = 0; renderLobbySafe(); }
-  }, 12000);
+    if (net.openAttempts >= 4 && !net.error){
+      net.error = 'the connection brokers are slow to respond \u2014 still retrying automatically';
+    }
+    renderLobbySafe();
+    hostStartNet(state.roomCode);
+  }, 10000);
   try{
-    net.peer = new Peer(PEER_PREFIX + state.roomCode, ICE);
+    net.peer = new Peer(PEER_PREFIX + state.roomCode, brokerOpts(net.brokerIdx));
   }catch(e){ net.error = 'could not open a room (' + e.message + ')'; renderLobbySafe(); return; }
   net.peer.on('open', () => {
     net.open = true; net.error = null; net.idRetries = 0; net.openAttempts = 0;
+    state.brokerIdx = net.brokerIdx;
     clearTimeout(net.openWatch);
     clearInterval(net.keepAlive);
     net.keepAlive = setInterval(netBroadcast, 15000);
+    save();
     renderLobbySafe();
   });
   net.peer.on('error', err => {
     const t = (err && err.type) || '';
     if (t === 'unavailable-id'){
-      /* a ghost of a previous host session still holds this id on the broker; it expires
-         within ~1 min — retry the SAME code so already-scanned QR codes stay valid */
+      /* ghost of a previous host session still holds this id on this broker; it expires
+         within ~1 min \u2014 retry the SAME code on the SAME broker so scanned QRs stay valid */
       clearTimeout(net.openWatch);
       net.idRetries = (net.idRetries || 0) + 1;
-      if (net.idRetries <= 20) setTimeout(() => hostStartNet(state.roomCode), 3000);
+      if (net.idRetries <= 20){ net.openAttempts = Math.max(0, net.openAttempts - 1); setTimeout(() => hostStartNet(state.roomCode), 3000); }
       else { net.idRetries = 0; state.roomCode = null; hostStartNet(); }
       renderLobbySafe();
       return;
     }
     if (t === 'peer-unavailable' || t === 'webrtc' || t === 'negotiation-failed' || t === 'connection-closed'){
-      return; /* transient — one phone\u2019s handshake failed; the room itself is fine */
+      return; /* transient \u2014 one phone's handshake failed; the room itself is fine */
     }
-    if (t === 'network'){ net.open = false; try{ net.peer.reconnect(); }catch(e){} renderLobbySafe(); return; }
+    if (t === 'socket-error' || t === 'server-error' || t === 'socket-closed' || t === 'network'){
+      if (net.open){ net.open = false; try{ net.peer.reconnect(); }catch(e){} renderLobbySafe(); return; }
+      /* this broker refuses us (e.g. rate-limited cloud) \u2014 fail over to the next one fast */
+      clearTimeout(net.openWatch);
+      try{ net.peer.destroy(); }catch(e){}
+      setTimeout(() => hostStartNet(state.roomCode), 800);
+      return;
+    }
     net.error = t || 'unknown network error';
     renderLobbySafe();
   });
@@ -1371,7 +1394,8 @@ function pConnect(){
   }, 9000);
   let peer;
   try{
-    peer = pj.peer = new Peer(ICE);
+    pj.brokerIdx = ((pj.b0 || 0) + Math.floor((pj.attempt - 1) / 2)) % BROKERS.length;
+    peer = pj.peer = new Peer(brokerOpts(pj.brokerIdx));
   }catch(e){ setConn('bad','connection failed'); scheduleRetry(); return; }
   peer.on('open', () => {
     if (peer !== pj.peer) return;
@@ -1637,6 +1661,7 @@ function beep(){
         if (p && p.cid === pj.cid){ pj.joined = true; pj.name = p.name; pj.team = p.team; }
       }
     }catch(e){ pj.cid = 'c' + Math.random().toString(36).slice(2,10); }
+    pj.b0 = parseInt(new URLSearchParams(location.search).get('b') || '0', 10) || 0;
     pShow('p-join');
     pRender();
     loadTurn().finally(pConnect);

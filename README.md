@@ -36,7 +36,12 @@ The `.nojekyll` file is required — it tells GitHub to serve the files as-is.
 
 ## If phones get stuck on "connecting…"
 
-Some networks (eduroam, strict carriers) block direct WebRTC connections.
+The games connect through public signaling brokers with automatic failover
+(the official PeerJS cloud is frequently rate-limited — HTTP 429 — so a reliable
+community broker is tried first, and the chosen broker travels inside the QR code).
+The lobby shows live status under the room code: "✓ room open — phones can join".
+
+Beyond that, some networks (eduroam, strict carriers) block direct WebRTC connections.
 
 - **Quick fix:** ask affected participants to switch to mobile data.
 - **Proper fix (recommended before the workshop):** in the game lobby open
